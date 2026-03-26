@@ -1,3 +1,16 @@
+/**
+ * VoiceRelay JS
+ *
+ * Discord bot that joins a voice channel, captures user audio,
+ * transcribes speech via OpenAI Whisper, and relays the text
+ * to a designated text channel.
+ *
+ * Usage:
+ *   1. Copy .env.example to .env and fill in BOT_TOKEN, VOICE_CHANNEL_ID, TEXT_CHANNEL_ID
+ *   2. npm install
+ *   3. node bot.js
+ */
+
 require('dotenv').config();
 const { Client, GatewayIntentBits } = require('discord.js');
 const {
@@ -52,22 +65,19 @@ function writeWav(filePath, pcmBuffer) {
   const dataSize = pcmBuffer.length;
   const header = Buffer.alloc(44);
 
-  // RIFF header
   header.write('RIFF', 0);
   header.writeUInt32LE(36 + dataSize, 4);
   header.write('WAVE', 8);
 
-  // fmt chunk
   header.write('fmt ', 12);
-  header.writeUInt32LE(16, 16);         // chunk size
-  header.writeUInt16LE(1, 20);          // PCM format
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
   header.writeUInt16LE(CHANNELS, 22);
   header.writeUInt32LE(SAMPLE_RATE, 24);
   header.writeUInt32LE(SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE, 28);
   header.writeUInt16LE(CHANNELS * BYTES_PER_SAMPLE, 32);
   header.writeUInt16LE(BYTES_PER_SAMPLE * 8, 34);
 
-  // data chunk
   header.write('data', 36);
   header.writeUInt32LE(dataSize, 40);
 
@@ -84,17 +94,15 @@ function transcribe(wavPath) {
       { timeout: 60000 },
       (err, stdout, stderr) => {
         if (err) {
-          console.error('Whisper error:', err.message);
+          console.error('[transcribe] Whisper error:', err.message);
           return resolve(null);
         }
 
-        // Whisper writes <basename>.txt next to or in output_dir
         const baseName = path.basename(wavPath, '.wav');
         const txtPath = path.join(outputDir, `${baseName}.txt`);
 
         try {
           const text = fs.readFileSync(txtPath, 'utf-8').trim();
-          // Cleanup temp files
           try { fs.unlinkSync(wavPath); } catch {}
           try { fs.unlinkSync(txtPath); } catch {}
           resolve(text || null);
@@ -110,8 +118,6 @@ function transcribe(wavPath) {
 async function flushUser(userId, receiver) {
   const state = getUserState(userId);
   if (state.pcmChunks.length === 0) {
-    console.log(`[flush] No audio chunks for ${userId}, skipping`);
-    // Re-subscribe even if no audio, so they can speak again
     if (receiver) subscribeToUser(receiver, userId);
     return;
   }
@@ -120,11 +126,9 @@ async function flushUser(userId, receiver) {
   state.pcmChunks = [];
   state.speaking = false;
 
-  // Skip very short audio (< 0.5s)
   const durationSec = pcmBuffer.length / (SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE);
   if (durationSec < 0.1) {
     console.log(`[flush] User ${userId} — ${durationSec.toFixed(2)}s audio too short, skipping`);
-    // Re-subscribe so they can speak again
     if (receiver) subscribeToUser(receiver, userId);
     return;
   }
@@ -136,12 +140,10 @@ async function flushUser(userId, receiver) {
 
   const text = await transcribe(tmpFile);
 
-  // Re-subscribe after transcription so they can speak again
   if (receiver) subscribeToUser(receiver, userId);
 
   if (!text) return;
 
-  // Look up username
   const textChannel = client.channels.cache.get(TEXT_CHANNEL_ID);
   if (!textChannel) return;
 
@@ -155,7 +157,7 @@ async function flushUser(userId, receiver) {
   try {
     await textChannel.send(`\uD83C\uDF99\uFE0F **${username}**: ${text}\n<@1466498202705330375>`);
   } catch (err) {
-    console.error('Failed to send message:', err.message);
+    console.error('[error] Failed to send message:', err.message);
   }
 }
 
@@ -163,13 +165,8 @@ async function flushUser(userId, receiver) {
 function subscribeToUser(receiver, userId) {
   const state = getUserState(userId);
 
-  // If already subscribed, skip
-  if (state.subscribed) {
-    console.log(`[subscribe] Already subscribed to ${userId}, skipping`);
-    return;
-  }
+  if (state.subscribed) return;
 
-  console.log(`[subscribe] Subscribing to userId ${userId}`);
   state.subscribed = true;
   state.pcmChunks = [];
 
@@ -179,36 +176,32 @@ function subscribeToUser(receiver, userId) {
 
   const decoder = new OpusDecoder({ rate: SAMPLE_RATE, channels: CHANNELS, frameSize: 960 });
 
-  // Pipe opus stream through decoder to get PCM
   opusStream.pipe(decoder);
 
   decoder.on('data', (chunk) => {
     state.pcmChunks.push(chunk);
     state.speaking = true;
-    console.log(`[audio] Got PCM from ${userId}, bytes: ${chunk.length}`);
   });
 
   opusStream.on('end', () => {
-    console.log(`[audio] Stream ended for ${userId} (AfterSilence triggered)`);
     state.subscribed = false;
-    try { decoder.end(); } catch(e) {}
+    try { decoder.end(); } catch {}
     flushUser(userId, receiver);
-    // Re-subscribe so user can speak again
     setTimeout(() => subscribeToUser(receiver, userId), 250);
   });
 
   opusStream.on('error', (err) => {
-    console.error(`[audio] Opus stream error for ${userId}:`, err.message);
+    console.error(`[error] Opus stream error for ${userId}:`, err.message);
     state.subscribed = false;
     setTimeout(() => subscribeToUser(receiver, userId), 250);
   });
 
   opusStream.on('close', () => {
-    console.log(`[audio] Stream closed for ${userId}`);
+    // Stream closed, no action needed
   });
 }
 
-// Join the voice channel and set up receivers
+// Join the voice channel and set up audio receivers
 function connectToVoice(channel) {
   const connection = joinVoiceChannel({
     channelId: channel.id,
@@ -218,7 +211,6 @@ function connectToVoice(channel) {
     selfMute: true,
   });
 
-  // Log all status changes
   connection.on(VoiceConnectionStatus.Signalling, () => {
     console.log('[voice] Status: Signalling');
   });
@@ -231,17 +223,14 @@ function connectToVoice(channel) {
     console.log('[voice] Status: Destroyed');
   });
 
-  // Auto-reconnect logic
   connection.on(VoiceConnectionStatus.Disconnected, async () => {
-    console.log('[voice] Status: Disconnected — attempting reconnect...');
+    console.log('[voice] Disconnected — attempting reconnect...');
     try {
       await Promise.race([
         entersState(connection, VoiceConnectionStatus.Signalling, 5000),
         entersState(connection, VoiceConnectionStatus.Connecting, 5000),
       ]);
-      // Reconnecting automatically
     } catch {
-      // Connection truly lost — rejoin
       console.log('[voice] Reconnect failed — rejoining...');
       connection.destroy();
       setTimeout(() => connectToVoice(channel), 3000);
@@ -249,18 +238,12 @@ function connectToVoice(channel) {
   });
 
   connection.on(VoiceConnectionStatus.Ready, () => {
-    console.log('[voice] Status: Ready');
+    console.log('[voice] Connected and ready');
     const receiver = connection.receiver;
 
-    // Log the full receiver object keys for debugging
-    console.log('[debug] receiver keys:', Object.keys(receiver));
-    console.log('[debug] receiver.speaking keys:', Object.keys(receiver.speaking));
-    console.log('[debug] receiver.subscriptions keys:', [...receiver.subscriptions.keys()]);
-
-    // Approach A: Subscribe to anyone who starts speaking
     receiver.speaking.on('start', (userId) => {
       console.log(`[speaking] User ${userId} started speaking`);
-      if (userId === client.user.id) return; // skip self
+      if (userId === client.user.id) return;
       subscribeToUser(receiver, userId);
     });
 
@@ -268,19 +251,17 @@ function connectToVoice(channel) {
       console.log(`[speaking] User ${userId} stopped speaking`);
     });
 
-    // Approach B: Proactively subscribe to members already in the channel
-    console.log(`[voice] Channel members: ${channel.members.map(m => `${m.user.tag} (${m.id})`).join(', ')}`);
+    // Subscribe to members already in the channel
     channel.members.forEach((member) => {
-      if (member.id === client.user.id) return; // skip self
+      if (member.id === client.user.id) return;
       if (!member.user.bot) {
-        console.log(`[voice] Proactively subscribing to existing member: ${member.user.tag} (${member.id})`);
         subscribeToUser(receiver, member.id);
       }
     });
   });
 
   connection.on('error', (err) => {
-    console.error('[voice] Connection error:', err.message);
+    console.error('[error] Voice connection error:', err.message);
   });
 
   return connection;
