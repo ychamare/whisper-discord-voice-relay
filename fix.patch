@@ -1,0 +1,1 @@
+Change the subscribeToUser function to pipe opusStream through decoder properly
